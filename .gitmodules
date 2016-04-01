@@ -1,0 +1,3 @@
+[submodule "hamjet"]
+	path = hamjet
+	url = https://github.com/pulponite/hamjet.git
