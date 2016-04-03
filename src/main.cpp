@@ -1,7 +1,11 @@
 #include "Hamjet/Engine.hpp"
 #include "Hamjet/ImageLoader.hpp"
+#include "Hamjet/Memory.hpp"
+#include "Hamjet/NeuralNet.hpp"
 
 #include <random>
+#include <memory>
+#include <list>
 
 #define WINDOW_WIDTH 640
 #define WINDOW_HEIGHT 480
@@ -29,7 +33,7 @@ struct GameShapes {
 	Shape shapes[6] = {
 		{ {{ -1,0 },{ 0,0 },{ 1, 0 }}, 1},
 		{ {{ 0,-1 },{ 0,0 },{ 0, 1 }}, 0},
-	
+
 		{ {{ 0,-1 },{ 0,0 },{ 1, 0 }}, 3},
 		{ {{ 1, 0 },{ 0,0 },{ 0, 1 }}, 4},
 		{ {{ 0, 1 },{ 0,0 },{ -1,0 }}, 5},
@@ -64,7 +68,7 @@ public:
 		}
 
 		twister.seed(gameSeed);
-		
+
 		addNextPiece();
 	}
 
@@ -80,6 +84,8 @@ public:
 		currentShapeY = 1;
 
 		traceShape(movingGrid, piece, 3, 1, 1);
+
+		return true;
 	}
 
 	void traceShape(uint8_t grid[GRID_HEIGHT][GRID_WIDTH], int piece, int x, int y, uint8_t val) {
@@ -141,7 +147,7 @@ public:
 				isFull = isFull && (fixedGrid[y][x] == 1);
 				hasAny = hasAny || (fixedGrid[y][x] == 1);
 			}
-			
+
 			if (isFull) {
 				rc++;
 				SDL_memset(fixedGrid[y], 0, GRID_WIDTH);
@@ -181,34 +187,167 @@ public:
 			printf("New Score: %d\n", score);
 
 			return addNextPiece();
+		} else {
+			return true;
 		}
 	}
 };
+
+class GameSimulator {
+public:
+	const int numInputs = GRID_WIDTH * GRID_HEIGHT;
+	const int numOutputs = 3;
+
+	GameGrid gg;
+	std::shared_ptr<Hamjet::NeuralNet> net;
+
+	bool leftState;
+	bool rightState;
+	bool rotateState;
+
+public:
+	GameSimulator(int seed, std::shared_ptr<Hamjet::NeuralNet> n) : gg(seed), net(n),
+		leftState(false), rightState(false), rotateState(false) { }
+
+	void simulateStep() {
+		fillInputs();
+		net->stepNetwork();
+
+		bool leftDown = net->getNode(numInputs + 0)->value() > 0;
+		if (leftDown && !leftState) {
+			gg.moveLeft();
+		}
+		leftState = leftDown;
+
+		bool rightDown = net->getNode(numInputs + 1)->value() > 0;
+		if (rightDown && !rightState) {
+			gg.moveRight();
+		}
+		rightState = rightDown;
+
+		bool rotateDown = net->getNode(numInputs + 2)->value() > 0;
+		if (rotateDown && !rotateState) {
+			gg.rotate();
+		}
+		rotateState = rotateDown;
+	}
+
+	bool tickGame() {
+		for (int i = 0; i < 4; i++) {
+			simulateStep();
+		}
+		return gg.tick();
+	}
+
+	int runEntireGame() {
+		while (tickGame()) {}
+		return gg.score;
+	}
+
+	void fillInputs() {
+		for (int y = 0; y < GRID_HEIGHT; y++) {
+			for (int x = 0; x < GRID_WIDTH; x++) {
+				int index = y * GRID_WIDTH + x;
+				if (gg.fixedGrid[y][x] == 1) {
+					net->getNode(index)->setValue(1);
+				}
+				else if (gg.movingGrid[y][x] == 1) {
+					net->getNode(index)->setValue(-1);
+				}
+			}
+		}
+	}
+};
+
+class Gene {
+public:
+	int innovationNumber;
+	int nodeFrom;
+	int nodeTo;
+	float weight;
+	bool disabled;
+};
+
+class Genome {
+public:
+	int fitness;
+
+	int numNodes;
+	std::vector<Gene> genes;
+
+public:
+	std::shared_ptr<Hamjet::NeuralNet> buildNeuralNet() {
+		auto net = std::make_shared<Hamjet::NeuralNet>();
+
+		int numInputs = GRID_HEIGHT * GRID_WIDTH;
+		int numOutputs = 10;
+
+		for (int i = 0; i < numInputs + numOutputs; i++) {
+			auto n = std::make_shared<Hamjet::NeuralNetNode>();
+			net->addNode(n);
+		}
+
+		net->getNode(GRID_HEIGHT * GRID_WIDTH)->connect(std::make_unique<Hamjet::NeuralNetConnection>(net->getNode(3), -1.0f));
+
+		return net;
+	}
+};
+
+class NeatEvolver {
+public:
+	const int generationSize = 150;
+
+	std::list<std::shared_ptr<Genome>> generation;
+
+public:
+	NeatEvolver() {
+		firstGeneration();
+	}
+
+	void firstGeneration() {
+		for (int i = 0; i < generationSize; i++) {
+			generation.push_back(std::make_shared<Genome>());
+		}
+	}
+
+	std::shared_ptr<Genome> processGeneration() {
+		std::shared_ptr<Genome> winner;
+
+		for (auto& g : generation) {
+			GameSimulator s(0, g->buildNeuralNet());
+			g->fitness = s.runEntireGame();
+
+			if (!winner.get() || winner->fitness < g->fitness) {
+				winner = g;
+			}
+		}
+
+		return winner;
+	}
+};
+
+
+
 
 class NeatrisApp : public Hamjet::Application {
 private:
 	Hamjet::Engine* engine;
 
-	SDL_Surface* tileSurface;
-	SDL_Texture* tileTexture;
+	Hamjet::SDL_Surface_Ptr tileSurface;
+	Hamjet::SDL_Texture_Ptr tileTexture;
 
-	GameGrid* grid;
+	std::unique_ptr<GameSimulator> simulator;
 
-	uint32_t simulationPeriod = 50;
+	NeatEvolver evolver;
+
+	uint32_t simulationPeriod = 100;
 	uint32_t lastSimTime = 0;
-	uint32_t simsPerTick = 2;
-	uint32_t simsSinceTick = 0;
 
 public:
-	NeatrisApp(Hamjet::Engine* e) : engine(e), grid(NULL) {
-		tileSurface = Hamjet::ImageLoader::loadPng("assets/tile.png");
-		tileTexture = SDL_CreateTextureFromSurface(engine->windowRenderer, tileSurface);
-		grid = new GameGrid(0);
-	}
-
-	~NeatrisApp() {
-		SDL_DestroyTexture(tileTexture);
-		SDL_FreeSurface(tileSurface);
+	NeatrisApp(Hamjet::Engine* e) : engine(e),
+		tileSurface(Hamjet::SDL_Surface_Ptr(Hamjet::ImageLoader::loadPng("assets/tile.png"), SDL_FreeSurface)),
+		tileTexture(Hamjet::SDL_Texture_Ptr(SDL_CreateTextureFromSurface(e->windowRenderer, tileSurface.get()), SDL_DestroyTexture)) {
+		newState();
 	}
 
 	virtual bool update(float dt) {
@@ -217,12 +356,6 @@ public:
 		if (now - lastSimTime > simulationPeriod) {
 			sim();
 			lastSimTime = now;
-			simsSinceTick++;
-
-			if (simsSinceTick == simsPerTick) {
-				tick();
-				simsSinceTick = 0;
-			}
 		}
 
 		return true;
@@ -233,16 +366,15 @@ public:
 		SDL_RenderClear(engine->windowRenderer);
 
 		drawStaticGrid();
-		if (grid != NULL) {
-			drawDynamicGrid(grid->fixedGrid);
-			drawDynamicGrid(grid->movingGrid);
+		if (auto sim = simulator.get()) {
+			drawDynamicGrid(sim->gg.fixedGrid);
+			drawDynamicGrid(sim->gg.movingGrid);
 		}
 
 		SDL_RenderPresent(engine->windowRenderer);
 	}
 
 	virtual void onClick(int x, int y) {
-		grid->rotate();
 		return;
 	}
 
@@ -267,12 +399,12 @@ public:
 
 	void drawDynamicGrid(uint8_t grid[GRID_HEIGHT][GRID_WIDTH]) {
 		SDL_Rect dest;
-		SDL_SetTextureColorMod(tileTexture, 255, 255, 255);
+		SDL_SetTextureColorMod(tileTexture.get(), 255, 255, 255);
 		for (int y = 0; y < GRID_HEIGHT; y++) {
 			for (int x = 0; x < GRID_WIDTH; x++) {
 				if (grid[y][x] != 0) {
 					fillGridPosition(&dest, x, y);
-					SDL_RenderCopy(engine->windowRenderer, tileTexture, NULL, &dest);
+					SDL_RenderCopy(engine->windowRenderer, tileTexture.get(), NULL, &dest);
 				}
 			}
 		}
@@ -280,19 +412,18 @@ public:
 
 	void drawStaticGrid() {
 		SDL_Rect dest;
-
-		SDL_SetTextureColorMod(tileTexture, 128, 128, 128);
+		SDL_SetTextureColorMod(tileTexture.get(), 128, 128, 128);
 
 		for (int y = 0; y <= GRID_HEIGHT; y++) {
 			fillGridPosition(&dest, -1, y);
-			SDL_RenderCopy(engine->windowRenderer, tileTexture, NULL, &dest);
+			SDL_RenderCopy(engine->windowRenderer, tileTexture.get(), NULL, &dest);
 			fillGridPosition(&dest, GRID_WIDTH, y);
-			SDL_RenderCopy(engine->windowRenderer, tileTexture, NULL, &dest);
+			SDL_RenderCopy(engine->windowRenderer, tileTexture.get(), NULL, &dest);
 		}
 
 		for (int x = 0; x < GRID_WIDTH; x++) {
 			fillGridPosition(&dest, x, GRID_HEIGHT);
-			SDL_RenderCopy(engine->windowRenderer, tileTexture, NULL, &dest);
+			SDL_RenderCopy(engine->windowRenderer, tileTexture.get(), NULL, &dest);
 		}
 	}
 
@@ -304,14 +435,19 @@ public:
 	}
 
 	void sim() {
-
+		if (!simulator->tickGame()) {
+			newState();
+		}
 	}
 
-	void tick() {
-		if (!grid->tick()) {
-			delete grid;
-			grid = new GameGrid(0);
-		}
+	void newState() {
+		auto winner = evolver.processGeneration();
+		simulator = std::make_unique<GameSimulator>(0, winner->buildNeuralNet());
+	}
+
+	int scoreNet(Genome& genome) {
+		GameSimulator sim(0, genome.buildNeuralNet());
+		return sim.runEntireGame();
 	}
 };
 
@@ -323,9 +459,10 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
-	NeatrisApp* app = new NeatrisApp(&engine);
-	engine.run(app);
-	delete app;
+	{
+		std::unique_ptr<NeatrisApp> app = std::make_unique<NeatrisApp>(&engine);
+		engine.run(app.get());
+	}
 
 	engine.term();
 	return 0;
