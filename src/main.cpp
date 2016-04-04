@@ -2,13 +2,15 @@
 #include "Hamjet/ImageLoader.hpp"
 #include "Hamjet/Memory.hpp"
 #include "Hamjet/NeuralNet.hpp"
+#include "Hamjet/NeatEvolver.hpp"
 
 #include <random>
 #include <memory>
 #include <list>
+#include <set>
 
-#define WINDOW_WIDTH 640
-#define WINDOW_HEIGHT 480
+#define WINDOW_WIDTH 200
+#define WINDOW_HEIGHT 350
 
 #define GRID_WIDTH 7
 #define GRID_HEIGHT 14
@@ -184,8 +186,6 @@ public:
 			} else if (rowsAdded == 1) {
 				score += 1;
 			}
-			printf("New Score: %d\n", score);
-
 			return addNextPiece();
 		} else {
 			return true;
@@ -259,74 +259,21 @@ public:
 	}
 };
 
-class Gene {
-public:
-	int innovationNumber;
-	int nodeFrom;
-	int nodeTo;
-	float weight;
-	bool disabled;
-};
 
-class Genome {
-public:
-	int fitness;
+class NeatGameSim : public Hamjet::NeatSimulator {
+	virtual int getNumInputs() {
+		return GRID_WIDTH * GRID_HEIGHT;
+	}
 
-	int numNodes;
-	std::vector<Gene> genes;
+	virtual int getNumOutputs() {
+		return 3;
+	}
 
-public:
-	std::shared_ptr<Hamjet::NeuralNet> buildNeuralNet() {
-		auto net = std::make_shared<Hamjet::NeuralNet>();
-
-		int numInputs = GRID_HEIGHT * GRID_WIDTH;
-		int numOutputs = 10;
-
-		for (int i = 0; i < numInputs + numOutputs; i++) {
-			auto n = std::make_shared<Hamjet::NeuralNetNode>();
-			net->addNode(n);
-		}
-
-		net->getNode(GRID_HEIGHT * GRID_WIDTH)->connect(std::make_unique<Hamjet::NeuralNetConnection>(net->getNode(3), -1.0f));
-
-		return net;
+	virtual int evaluateGenome(Hamjet::Genome& g) {
+		GameSimulator gs(0, g.buildNeuralNet());
+		return gs.runEntireGame();
 	}
 };
-
-class NeatEvolver {
-public:
-	const int generationSize = 150;
-
-	std::list<std::shared_ptr<Genome>> generation;
-
-public:
-	NeatEvolver() {
-		firstGeneration();
-	}
-
-	void firstGeneration() {
-		for (int i = 0; i < generationSize; i++) {
-			generation.push_back(std::make_shared<Genome>());
-		}
-	}
-
-	std::shared_ptr<Genome> processGeneration() {
-		std::shared_ptr<Genome> winner;
-
-		for (auto& g : generation) {
-			GameSimulator s(0, g->buildNeuralNet());
-			g->fitness = s.runEntireGame();
-
-			if (!winner.get() || winner->fitness < g->fitness) {
-				winner = g;
-			}
-		}
-
-		return winner;
-	}
-};
-
-
 
 
 class NeatrisApp : public Hamjet::Application {
@@ -338,15 +285,16 @@ private:
 
 	std::unique_ptr<GameSimulator> simulator;
 
-	NeatEvolver evolver;
+	Hamjet::NeatEvolver evolver;
 
-	uint32_t simulationPeriod = 100;
+	uint32_t simulationPeriod = 1;
 	uint32_t lastSimTime = 0;
 
 public:
 	NeatrisApp(Hamjet::Engine* e) : engine(e),
 		tileSurface(Hamjet::SDL_Surface_Ptr(Hamjet::ImageLoader::loadPng("assets/tile.png"), SDL_FreeSurface)),
-		tileTexture(Hamjet::SDL_Texture_Ptr(SDL_CreateTextureFromSurface(e->windowRenderer, tileSurface.get()), SDL_DestroyTexture)) {
+		tileTexture(Hamjet::SDL_Texture_Ptr(SDL_CreateTextureFromSurface(e->windowRenderer, tileSurface.get()), SDL_DestroyTexture)),
+		evolver(std::shared_ptr<Hamjet::NeatSimulator>(new NeatGameSim())) {
 		newState();
 	}
 
@@ -442,10 +390,47 @@ public:
 
 	void newState() {
 		auto winner = evolver.processGeneration();
+
+		printf("Generation winner score: %d\n", winner->fitness);
+		for (auto gene : winner->genes) {
+			printf("[%d:", gene.innovationNumber);
+
+			if (gene.disabled) {
+				printf("X:");
+			}
+
+			if (gene.nodeFrom < winner->inNodes) {
+				printf("i(%d,%d),", gene.nodeFrom % GRID_WIDTH, gene.nodeFrom / GRID_HEIGHT);
+			}
+			else {
+				printf("%d,", gene.nodeFrom);
+			}
+
+			if (gene.nodeTo < winner->inNodes + winner->outNodes) {
+				int out = gene.nodeTo - winner->inNodes;
+				if (out == 0) {
+					printf("o(Left)]");
+				}
+				else if (out == 1) {
+					printf("o(Right)]");
+				}
+				else if (out == 2) {
+					printf("o(Rotate)]");
+				}
+			}
+			else {
+				printf("%d] ", gene.nodeTo);
+			}
+		}
+		printf("\n");
+
+		/*for (int i = 0; i < 100; i++) {
+			evolver.processGeneration();
+		}*/
 		simulator = std::make_unique<GameSimulator>(0, winner->buildNeuralNet());
 	}
 
-	int scoreNet(Genome& genome) {
+	int scoreNet(Hamjet::Genome& genome) {
 		GameSimulator sim(0, genome.buildNeuralNet());
 		return sim.runEntireGame();
 	}
