@@ -14,14 +14,18 @@
 
 #define GRID_WIDTH 7
 #define GRID_HEIGHT 14
+#define MAX_PIECE_COUNT 5 * 7 * 14
 
 #define GRID_X 30
 #define GRID_Y 30
 
 #define TILE_SCALE 2
 
+#define PIECE_COUNT 3
+#define NET_ALGO 0
+
 struct Shape {
-	int8_t pieces[3][2];
+	int8_t pieces[PIECE_COUNT][2];
 	int nextShape;
 };
 
@@ -31,6 +35,20 @@ struct ShapeClass {
 };
 
 struct GameShapes {
+#if PIECE_COUNT == 1
+	const int allShapeCount = 1;
+	Shape shapes[1] = {
+		{ { { 0,0 } }, 0 }
+	};
+#elif PIECE_COUNT == 2
+	const int allShapeCount = 4;
+	Shape shapes[4] = {
+		{ { { 0,0 }, { 1,0 } }, 1 },
+		{ { { 0,0 },{ 0,1 } }, 2 },
+		{ { { 0,0 },{ -1,0 } }, 3 },
+		{ { { 0,0 },{ 0,-1 } }, 0 },
+	};
+#else
 	const int allShapeCount = 6;
 	Shape shapes[6] = {
 		{ {{ -1,0 },{ 0,0 },{ 1, 0 }}, 1},
@@ -41,6 +59,7 @@ struct GameShapes {
 		{ {{ 0, 1 },{ 0,0 },{ -1,0 }}, 5},
 		{ {{ -1,0 },{ 0,0 },{ 0,-1 }}, 2}
 	};
+#endif
 };
 
 class GameGrid {
@@ -58,10 +77,12 @@ public:
 	int currentShapeY;
 
 	int lastLowestRow;
-	int score;
+	int score = 1;
+
+	int pieceCount = 0;
 
 public:
-	GameGrid(unsigned int seed) : gameSeed(seed), score(0), lastLowestRow(GRID_HEIGHT) {
+	GameGrid(unsigned int seed) : gameSeed(seed), lastLowestRow(GRID_HEIGHT) {
 		for (int y = 0; y < GRID_HEIGHT; y++) {
 			for (int x = 0; x < GRID_WIDTH; x++) {
 				fixedGrid[y][x] = 0;
@@ -81,18 +102,25 @@ public:
 			return false;
 		}
 
+		if (pieceCount >= MAX_PIECE_COUNT) {
+			printf("Finished game \\o/\n");
+			return false;
+		}
+
 		currentShape = piece;
 		currentShapeX = 3;
 		currentShapeY = 1;
 
 		traceShape(movingGrid, piece, 3, 1, 1);
 
+		pieceCount++;
+
 		return true;
 	}
 
 	void traceShape(uint8_t grid[GRID_HEIGHT][GRID_WIDTH], int piece, int x, int y, uint8_t val) {
 		Shape* s = &shapes.shapes[piece];
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0; i < PIECE_COUNT; i++) {
 			int nx = x + s->pieces[i][0];
 			int ny = y + s->pieces[i][1];
 			grid[ny][nx] = val;
@@ -101,7 +129,7 @@ public:
 
 	bool canFitPiece(int piece, int x, int y) {
 		Shape* s = &shapes.shapes[piece];
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0; i < PIECE_COUNT; i++) {
 			int nx = x + s->pieces[i][0];
 			int ny = y + s->pieces[i][1];
 
@@ -173,6 +201,18 @@ public:
 			traceShape(fixedGrid, currentShape, currentShapeX, currentShapeY, 1);
 			traceShape(movingGrid, currentShape, currentShapeX, currentShapeY, 0);
 
+			int minY = currentShapeY;
+			for (int i = 0; i < PIECE_COUNT; i++) {
+				if (currentShapeY + shapes.shapes[currentShape].pieces[i][1] < minY) {
+					minY = currentShapeY + shapes.shapes[currentShape].pieces[i][1];
+				}
+			}
+
+			int rowsBelow = minY - lastLowestRow;
+			if (rowsBelow < 0) {
+				rowsBelow = 0;
+			}
+
 			int rowsCleared;
 			int lowestRow;
 			clearFullRows(&rowsCleared, &lowestRow);
@@ -180,12 +220,8 @@ public:
 			int rowsAdded = lastLowestRow - lowestRow;
 			lastLowestRow = lowestRow;
 
+			score++;
 			score += rowsCleared * 10;
-			if (rowsAdded == 0) {
-				score += 3;
-			} else if (rowsAdded == 1) {
-				score += 1;
-			}
 			return addNextPiece();
 		} else {
 			return true;
@@ -193,7 +229,7 @@ public:
 	}
 };
 
-class GameSimulator {
+class GameSimulatorBigNet {
 public:
 	const int numInputs = GRID_WIDTH * GRID_HEIGHT;
 	const int numOutputs = 3;
@@ -206,27 +242,31 @@ public:
 	bool rotateState;
 
 public:
-	GameSimulator(int seed, std::shared_ptr<Hamjet::NeuralNet> n) : gg(seed), net(n),
+	GameSimulatorBigNet(int seed, std::shared_ptr<Hamjet::NeuralNet> n) : gg(seed), net(n),
 		leftState(false), rightState(false), rotateState(false) { }
 
 	void simulateStep() {
 		fillInputs();
 		net->stepNetwork();
 
-		bool leftDown = net->getNode(numInputs + 0)->value() > 0;
-		if (leftDown && !leftState) {
+		auto leftNode = net->getNode(numInputs + 0);
+		auto rightNode = net->getNode(numInputs + 1);
+		auto rotateNode = net->getNode(numInputs + 2);
+
+		bool leftDown = leftNode->value() > 0.1f;
+		if (leftDown/* && !leftState*/) {
 			gg.moveLeft();
 		}
 		leftState = leftDown;
 
-		bool rightDown = net->getNode(numInputs + 1)->value() > 0;
-		if (rightDown && !rightState) {
+		bool rightDown = rightNode->value() > 0.1f;
+		if (rightDown/* && !rightState*/) {
 			gg.moveRight();
 		}
 		rightState = rightDown;
 
-		bool rotateDown = net->getNode(numInputs + 2)->value() > 0;
-		if (rotateDown && !rotateState) {
+		bool rotateDown = rotateNode->value() > 0.1f;
+		if (rotateDown/* && !rotateState*/) {
 			gg.rotate();
 		}
 		rotateState = rotateDown;
@@ -260,7 +300,7 @@ public:
 };
 
 
-class NeatGameSim : public Hamjet::NeatSimulator {
+class NeatGameSimBig : public Hamjet::NeatSimulator {
 	virtual int getNumInputs() {
 		return GRID_WIDTH * GRID_HEIGHT;
 	}
@@ -270,10 +310,123 @@ class NeatGameSim : public Hamjet::NeatSimulator {
 	}
 
 	virtual int evaluateGenome(Hamjet::Genome& g) {
-		GameSimulator gs(0, g.buildNeuralNet());
+		GameSimulatorBigNet gs(0, g.buildNeuralNet());
 		return gs.runEntireGame();
 	}
 };
+
+
+class GameSimulatorSmallNet {
+public:
+	const int numInputs = GRID_WIDTH * GRID_HEIGHT;
+	const int numOutputs = 3;
+
+	GameGrid gg;
+	std::shared_ptr<Hamjet::NeuralNet> net;
+
+	bool leftState;
+	bool rightState;
+	bool rotateState;
+
+public:
+	GameSimulatorSmallNet(int seed, std::shared_ptr<Hamjet::NeuralNet> n) : gg(seed), net(n),
+		leftState(false), rightState(false), rotateState(false) { }
+
+	void simulateStep() {
+		fillInputs();
+		net->stepNetwork();
+
+		bool leftDown = net->getNode(numInputs + 0)->value() > 0;
+		if (leftDown) {
+			gg.moveLeft();
+		}
+		leftState = leftDown;
+
+		bool rightDown = net->getNode(numInputs + 1)->value() > 0;
+		if (rightDown) {
+			gg.moveRight();
+		}
+		rightState = rightDown;
+
+		bool rotateDown = net->getNode(numInputs + 2)->value() > 0;
+		if (rotateDown) {
+			gg.rotate();
+		}
+		rotateState = rotateDown;
+	}
+
+	bool tickGame() {
+		for (int i = 0; i < 4; i++) {
+			simulateStep();
+		}
+		return gg.tick();
+	}
+
+	int runEntireGame() {
+		while (tickGame()) {}
+		return gg.score;
+	}
+
+	void fillInputs() {
+		for (int y = 0; y < GRID_HEIGHT; y++) {
+			int adjustedy = (y + gg.currentShapeY) - 2;
+			for (int x = 0; x < GRID_WIDTH; x++) {
+				int adjustedx = (x + gg.currentShapeX) - 3;
+				int inputIndex = y * GRID_WIDTH + x;
+
+				auto node = net->getNode(inputIndex);
+				if (adjustedx < 0 || adjustedx >= GRID_WIDTH || adjustedy >= GRID_HEIGHT) {
+					node->setValue(1);
+				}
+				else if (adjustedy < 0) {
+					node->setValue(0);
+				}
+				else {
+					if (gg.fixedGrid[adjustedy][adjustedx] == 1) {
+						node->setValue(1);
+					}
+					else if (gg.movingGrid[adjustedy][adjustedx] == 1) {
+						node->setValue(-1);
+					}
+					else {
+						node->setValue(0);
+					}
+				}
+			}
+		}
+
+
+		if (gg.currentShapeY == 10) {
+			int i = 1;
+			i++;
+		}
+	}
+};
+
+
+class NeatGameSimSmall : public Hamjet::NeatSimulator {
+	virtual int getNumInputs() {
+		return GRID_WIDTH * GRID_HEIGHT;
+	}
+
+	virtual int getNumOutputs() {
+		return 3;
+	}
+
+	virtual int evaluateGenome(Hamjet::Genome& g) {
+		GameSimulatorSmallNet gs(0, g.buildNeuralNet());
+		return gs.runEntireGame();
+	}
+};
+
+#if NET_ALGO == 0
+typedef GameSimulatorSmallNet GameSim;
+typedef NeatGameSimSmall NeatSim;
+#else
+typedef GameSimulatorBigNet GameSim;
+typedef NeatGameSimBig NeatSim;
+#endif
+
 
 
 class NeatrisApp : public Hamjet::Application {
@@ -283,7 +436,7 @@ private:
 	Hamjet::SDL_Surface_Ptr tileSurface;
 	Hamjet::SDL_Texture_Ptr tileTexture;
 
-	std::unique_ptr<GameSimulator> simulator;
+	std::unique_ptr<GameSim> simulator;
 
 	Hamjet::NeatEvolver evolver;
 
@@ -294,7 +447,7 @@ public:
 	NeatrisApp(Hamjet::Engine* e) : engine(e),
 		tileSurface(Hamjet::SDL_Surface_Ptr(Hamjet::ImageLoader::loadPng("assets/tile.png"), SDL_FreeSurface)),
 		tileTexture(Hamjet::SDL_Texture_Ptr(SDL_CreateTextureFromSurface(e->windowRenderer, tileSurface.get()), SDL_DestroyTexture)),
-		evolver(std::shared_ptr<Hamjet::NeatSimulator>(new NeatGameSim())) {
+		evolver(std::shared_ptr<Hamjet::NeatSimulator>(new NeatSim())) {
 		newState();
 	}
 
@@ -343,6 +496,13 @@ public:
 				grid = new GameGrid(0);
 			}
 		}*/
+		const uint8_t* keys = SDL_GetKeyboardState(NULL);
+		if (keys[SDL_SCANCODE_LEFT]) {
+			simulationPeriod--;
+		}
+		else if (keys[SDL_SCANCODE_RIGHT]) {
+			simulationPeriod++;
+		}
 	}
 
 	void drawDynamicGrid(uint8_t grid[GRID_HEIGHT][GRID_WIDTH]) {
@@ -391,7 +551,7 @@ public:
 	void newState() {
 		auto winner = evolver.processGeneration();
 
-		printf("Generation winner score: %d\n", winner->fitness);
+		printf("Generation %d winner score: %d\n", evolver.generationCount, winner->fitness);
 		for (auto gene : winner->genes) {
 			printf("[%d:", gene.innovationNumber);
 
@@ -400,7 +560,7 @@ public:
 			}
 
 			if (gene.nodeFrom < winner->inNodes) {
-				printf("i(%d,%d),", gene.nodeFrom % GRID_WIDTH, gene.nodeFrom / GRID_HEIGHT);
+				printf("i(%d,%d),", gene.nodeFrom % GRID_WIDTH, gene.nodeFrom / GRID_WIDTH);
 			}
 			else {
 				printf("%d,", gene.nodeFrom);
@@ -422,17 +582,13 @@ public:
 				printf("%d] ", gene.nodeTo);
 			}
 		}
+		printf("\nNext Gen: ");
+		for (auto& s : evolver.speciatedGeneration) {
+			printf("[%d]", s.genomes.size());
+		}
 		printf("\n");
 
-		/*for (int i = 0; i < 100; i++) {
-			evolver.processGeneration();
-		}*/
-		simulator = std::make_unique<GameSimulator>(0, winner->buildNeuralNet());
-	}
-
-	int scoreNet(Hamjet::Genome& genome) {
-		GameSimulator sim(0, genome.buildNeuralNet());
-		return sim.runEntireGame();
+		simulator = std::make_unique<GameSim>(0, winner->buildNeuralNet());
 	}
 };
 
